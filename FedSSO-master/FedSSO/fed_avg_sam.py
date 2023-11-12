@@ -4,7 +4,7 @@ import tensorflow as tf
 
 from keras.datasets import cifar10
 from keras.datasets import mnist
-from keras.optimizers.legacy import SGD
+from keras.optimizers.legacy import SGD, Adam
 from keras.utils import to_categorical
 from keras.backend import image_data_format
 
@@ -15,7 +15,7 @@ import copy
 import random
 import sys
 
-from build_model import Model
+from build_model import Model, SAMModel, scale, augment, get_training_model
 import csv
 
 dataset_name = 'cifar10'
@@ -26,16 +26,16 @@ NUMOFCLIENTS = 10 # number of client(as particles)
 SELECT_CLIENTS = 0.5 # c
 ROUND = 30 # number of total iteration
 CLIENT_EPOCHS = 5 # number of each client's iteration
-BATCH_SIZE = 10 # Size of batches to train on
+BATCH_SIZE =  128 # Size of batches to train on
 DROP_RATE = 0
 
 # model config 
-LOSS = 'categorical_crossentropy' # Loss function
+LOSS = 'sparse_categorical_crossentropy' # Loss function
 NUMOFCLASSES = 10 # Number of classes
 lr = 0.0025
 # OPTIMIZER = SGD(lr=0.015, decay=0.01, nesterov=False)
 OPTIMIZER = SGD(learning_rate=lr, momentum=0.9, decay=lr/(ROUND*CLIENT_EPOCHS), nesterov=False) # lr = 0.015, 67 ~ 69%
-
+# OPTIMIZER = Adam(learning_rate = lr)
 
 def write_csv(method_name, list):
     file_name = f'{method_name}_{dataset_name}_randomDrop_{DROP_RATE}%_output_C_{SELECT_CLIENTS}_LR_{lr}_CLI_{NUMOFCLIENTS}_CLI_EPOCHS_{CLIENT_EPOCHS}_TOTAL_ROUND_{ROUND}_BATCH_{BATCH_SIZE}.csv'
@@ -59,22 +59,24 @@ def load_dataset(dataset_name):
         X_train = X_train.reshape(X_train.shape[0], 28, 28, 1)
         X_test = X_test.reshape(X_test.shape[0], 28, 28, 1)
         
-    X_train = X_train.astype('float32')
-    X_test = X_test.astype('float32')
-    X_train = X_train / 255.0
-    X_test = X_test / 255.0
+    # X_train = X_train.astype('float32')
+    # X_test = X_test.astype('float32')
+    # X_train = X_train / 255.0
+    # X_test = X_test / 255.0
 
-    Y_train = to_categorical(Y_train)
-    Y_test = to_categorical(Y_test)
+    # Y_train = to_categorical(Y_train)
+    # Y_test = to_categorical(Y_test)
 
     return (X_train, Y_train), (X_test, Y_test)
 
 
-def init_model(train_data_shape):
-    model = Model(loss=LOSS, optimizer=OPTIMIZER, classes=NUMOFCLASSES)
-    fl_model = model.fl_paper_model(train_shape=train_data_shape)
-
-    return fl_model
+def init_model(x_train_shape, y_train_shape):
+    model = SAMModel(get_training_model(x_train_shape, y_train_shape))
+    model.compile(optimizer="adam", loss="sparse_categorical_crossentropy", metrics=["accuracy"])
+    # model.compile(optimizer=OPTIMIZER,
+    #               loss=LOSS,
+    #               metrics=["accuracy"])
+    return model
 
 
 def client_data_config(x_train, y_train):
@@ -108,18 +110,40 @@ def fedAVG(server_weight):
     return avg_weight
 
 
-def client_update(index, client, now_epoch, avg_weight):
+def client_update(index, client, now_epoch, avg_weight, client_data):
     print(f"client {index + 1}/{int(NUMOFCLIENTS * SELECT_CLIENTS)} fitting")
 
     if now_epoch != 0:
         client.set_weights(avg_weight) 
     
-    client.fit(client_data[index][0], client_data[index][1],
-        epochs=CLIENT_EPOCHS,
-        batch_size=BATCH_SIZE,
-        verbose=1,
-        validation_split=0.2,
+    AUTO = tf.data.AUTOTUNE
+
+    train_size = int(0.8 * client_data[index][1].shape[0])
+    test_size = int(0.2 * client_data[index][1].shape[0])
+    ds = tf.data.Dataset.from_tensor_slices((client_data[index][0], client_data[index][1]))
+    full_dataset = ds.shuffle(1024)
+    train_ds= full_dataset.take(train_size)
+    val_ds = full_dataset.skip(train_size)
+
+    #data augmentation
+    train_ds = (train_ds
+            # .shuffle(1024)
+            # .map(scale)
+            # .map(augment)
+            .batch(BATCH_SIZE)
+        )
+
+    val_ds = (val_ds
+        # .shuffle(1024)
+        # .map(scale)
+        # .map(augment)
+        .batch(BATCH_SIZE)
     )
+    client.fit(train_ds,
+                  # validation_split=0.2,
+                       validation_data=val_ds,
+                      #  callbacks=train_callbacks,
+                       epochs=CLIENT_EPOCHS)
 
     return client
 
@@ -129,14 +153,13 @@ if __name__ == "__main__":
     (x_train, y_train), (x_test, y_test) = load_dataset(dataset_name)
 
     #模型初始化
-    server_model = init_model(train_data_shape=x_train.shape[1:])
-    server_model.summary()
-
-    #將資料集切分成不同
+    server_model = init_model(x_train.shape[1:], NUMOFCLIENTS)
+    
+    #將資料集切分成不同client
     client_data = client_data_config(x_train, y_train)
     fl_model = []
     for i in range(NUMOFCLIENTS):
-        fl_model.append(init_model(train_data_shape=client_data[i][0].shape[1:]))
+        fl_model.append(init_model(client_data[i][0].shape[1:], NUMOFCLASSES))
 
     #初始權重為0
     avg_weight = np.zeros_like(server_model.get_weights())
@@ -161,7 +184,7 @@ if __name__ == "__main__":
 
         for index, client in enumerate(selected_model):
             #local training...
-            recv_model = client_update(index, client, r, avg_weight)
+            recv_model = client_update(index, client, r, avg_weight, client_data)
             
             rand = random.randint(0,99)
             drop_communication = range(DROP_RATE)
@@ -173,6 +196,11 @@ if __name__ == "__main__":
 
         server_model.set_weights(avg_weight)
         print("server {}/{} evaluate".format(r + 1, ROUND))
-        server_evaluate_acc.append(server_model.evaluate(x_test, y_test, batch_size=BATCH_SIZE, verbose=1))
 
-    write_csv("FedAvg", server_evaluate_acc)
+        # AUTO = tf.data.AUTOTUNE
+
+        test_ds = tf.data.Dataset.from_tensor_slices((x_test, y_test))
+        test_ds = (test_ds.batch(BATCH_SIZE))
+        server_evaluate_acc.append(server_model.evaluate(test_ds, batch_size=BATCH_SIZE, verbose=1))
+
+    write_csv("FedAvg_SAM", dataset_name, server_evaluate_acc)

@@ -13,28 +13,25 @@ import matplotlib.pyplot as plt
 import numpy as np
 import copy
 
-from build_model import Model
+from build_model import Model, SAMModel, scale, augment, get_training_model
 import csv
 import random
 import time
 
 # dataset_name = 'eminst'
-dataset_name = 'minst'
-# dataset_name = 'cifar10'
+# dataset_name = 'minst'
+dataset_name = 'cifar10'
 
 # client config
 NUMOFCLIENTS = 10 # number of client(as particles)
 SELECT_CLIENTS = 0.5 # c
 ROUND = 30 # number of total iteration
 CLIENT_EPOCHS = 5 # number of each client's iteration
-BATCH_SIZE = 10 # Size of batches to train on
-ACC = 0.3 # 0.4
-LOCAL_ACC = 0.7 # 0.6
-GLOBAL_ACC = 1.4 # 1.0
+BATCH_SIZE = 128 # Size of batches to train on
 
 DROP_RATE = 0 # 0 ~ 1.0 float value
 
-SSO_para = [0.2, 0.7]
+SSO_para = [0.2, 0.6]
 
 # model config 
 LOSS = 'categorical_crossentropy' # Loss function
@@ -89,7 +86,7 @@ def load_dataset(dataset_name):
     return (X_train, Y_train), (X_test, Y_test)
 
 
-def init_model(train_data_shape):
+def init_model(x_train_shape, y_train_shape):
     """
     Create a model for learning.
 
@@ -99,12 +96,16 @@ def init_model(train_data_shape):
     Returns:
         Sequential model
     """
-    model = Model(loss=LOSS, optimizer=OPTIMIZER, classes=NUMOFCLASSES)
-    init_model = model.fl_paper_model(train_shape=train_data_shape)
-    # init_model = model.deep_model(train_shape=train_data_shape)
-    # init_model = model.mobilenet(train_shape=train_data_shape)
+    model = get_training_model(x_train_shape, y_train_shape)
+    fl_model = MySAMModel(base_model = model)
+    # fl_model = SAMModel(get_training_model(x_train_shape, y_train_shape), RHO)
+    # fl_model = tf.keras.models.experimental.SharpnessAwareMinimization(
+    #           get_training_model(x_train_shape, y_train_shape),
+    #            rho=RHO
+    #           )
+    fl_model.compile(optimizer=OPTIMIZER, loss=LOSS, metrics=["accuracy"])
 
-    return init_model
+    return model
 
 
 def client_data_config(x_train, y_train):
@@ -151,22 +152,21 @@ class particle():
         self.local_best_score = 0.0
         self.global_best_score = 0.0
 
+        #dataset split
+        # train_size = int(0.8 * y_train.shape[0])
+        # test_size = int(0.2 * y_train.shape[0])
+        # ds = tf.data.Dataset.from_tensor_slices((x_train, y_train))
+        # full_dataset = ds.shuffle(1024)
+        # self.train_ds= full_dataset.take(train_size)
+        # self.val_ds = full_dataset.skip(train_size)
         self.x = x_train
         self.y = y_train
-
-        # acc = acceleration
-        self.parm = {'acc':ACC, 'local_acc':LOCAL_ACC, 'global_acc':GLOBAL_ACC}
         
         #SSO parameter setting
         self.Cg=SSO_para[0]
         self.Cp=SSO_para[1]
 
         self.local_gradient=None
-
-        # velocities init
-        self.velocities = [None] * len(client.get_weights())
-        for i, layer in enumerate(client.get_weights()):
-            self.velocities[i] = np.random.rand(*layer.shape) / 5 - 0.10
 
     def train_particle(self):
         print(f"client {self.particle_id+1}/{NUMOFCLIENTS} fitting")
@@ -178,6 +178,7 @@ class particle():
         # new_velocities = [None] * len(step_weight)
         new_weight = [None] * len(step_weight)
         rnd = random.random()
+
 
         # SSO algorithm applied to weights
         for index, layer in enumerate(step_weight):
@@ -191,9 +192,15 @@ class particle():
                 sol_name = 'personal best weight'
                 new_weight[index] = self.local_best_model.get_weights()[index]
 
-        step_model.set_weights(new_weight)
 
-        save_model_path = f'checkpoint_sso_copy/checkpoint_particle_{self.particle_id}'
+        step_model.set_weights(new_weight)
+        
+
+        #local gradient
+        # self.local_gradient = (np.array(new_weight)-np.array(step_weight))/lr
+        # print(f"local_gradient: {local_gradient.shape}")
+
+        save_model_path = f'checkpoint_sso_sam/checkpoint_particle_{self.particle_id}'
         mc = ModelCheckpoint(filepath=save_model_path, 
                             monitor='val_loss', 
                             mode='min',
@@ -201,6 +208,30 @@ class particle():
                             save_weights_only=True,
                             )
         print(f"client {self.particle_id+1}/{NUMOFCLIENTS} fitting : " + sol_name)
+
+
+        #data augmentation
+        # train_ds = tf.data.Dataset.from_tensor_slices((self.x, self.y))
+        # train_ds = (self.train_ds
+        #     .shuffle(1024)
+        #     # .map(scale)
+        #     # .map(augment)
+        #     .batch(BATCH_SIZE)
+        # )
+
+        # val_ds = (self.val_ds
+        #     .shuffle(1024)
+        #     # .map(scale)
+        #     # .map(augment)
+        #     .batch(BATCH_SIZE)
+        # )
+
+        # hist = step_model.fit(train_ds,
+        #           # validation_split=0.2,
+        #                validation_data=val_ds,
+        #               #  callbacks=train_callbacks,
+        #                epochs=CLIENT_EPOCHS)
+
         hist = step_model.fit(x=self.x, y=self.y,
                 epochs=CLIENT_EPOCHS,
                 batch_size=BATCH_SIZE,
@@ -209,9 +240,11 @@ class particle():
                 callbacks=[mc],
                 )
         
+
         train_score_acc = hist.history['val_accuracy'][-1]
         # train_score_loss = hist.history['val_loss'][-1]
-        step_model.load_weights(save_model_path)
+        # step_model.load_weights(save_model_path)
+
 
         self.particle_model = step_model
 
@@ -266,6 +299,7 @@ def get_best_score_by_acc(step_result):
 
 
 def aggregation_with_para_c(server_result, sso_model):
+    # server_result [[pid, score], ...]
 
     server_result.sort(key=lambda x: x[1], reverse=True)
     server_result_sorted = server_result[:round(SELECT_CLIENTS*NUMOFCLIENTS)]
@@ -280,22 +314,34 @@ def aggregation_with_para_c(server_result, sso_model):
 
     return avg_weight
 
+def calculate_global_gradient(sso_model):
+    global_gradient=0.0
+    for c in NUMOFCLIENTS:
+        global_gradient += sso_model[c].local_gradient
+
+    print(f"global_gradient: {global_gradient.shape}")
+
+    print("first client correlation:")
+    theta = np.arccos(np.dot(sso_model[0].local_gradient, global_gradient)/np.linalg.norm(sso_model[0].local_gradient)/np.linalg.norm(global_gradient))
+    print("{theta.train_shape}")
+
 
 if __name__ == "__main__":
     
     (x_train, y_train), (x_test, y_test) = load_dataset(dataset_name)
 
     #server model的初始化
-    server_model = init_model(train_data_shape=innerco )
-    print(server_model.summary())
+    server_model = init_model(x_train.shape[1:], NUMOFCLIENTS)
+    # print(server_model.summary())
 
     client_data = client_data_config(x_train, y_train)
     # print(client_data[0])
 
     #存每個particle(client)的model
+    
     sso_model = []
     for i in range(NUMOFCLIENTS):
-        sso_model.append(particle(particle_num=i, client=init_model(train_data_shape=x_train.shape[1:]), x_train=client_data[i][0], y_train=client_data[i][1]))
+        sso_model.append(particle(particle_num=i, client=init_model(client_data[i][0].shape[1:], NUMOFCLASSES), x_train=client_data[i][0], y_train=client_data[i][1]))
 
     server_evaluate_acc = []
     global_best_model = None
@@ -316,7 +362,16 @@ if __name__ == "__main__":
             
             pid, train_score, train_model = client.train_particle()
             server_result.append([pid, train_score, ])
-                        
+            
+            # calculate_global_gradient(sso_model)
+
+            # rand = random.randint(0, 99)
+
+            # # Randomly dropped data sent to the server
+            # drop_communication = range(DROP_RATE)
+            # if rand not in drop_communication:
+            #     server_result.append([pid, train_score])
+            
         # model aggregation
         # Send the optimal model to each client after the best score comparison
 
@@ -330,6 +385,7 @@ if __name__ == "__main__":
             if client.resp_model(gid) != None:
                 global_best_model = client.resp_model(gid)
 
+        
         if server_model.evaluate(x_test, y_test, batch_size=BATCH_SIZE)[1] < global_best_model.evaluate(x_test, y_test, batch_size=BATCH_SIZE)[1]:
           print('global useful')
           server_model = global_best_model

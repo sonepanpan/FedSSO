@@ -6,92 +6,8 @@ from keras.layers import Conv2D, DepthwiseConv2D, SeparableConv2D
 from keras.layers import AvgPool2D, MaxPooling2D, Dropout, Flatten, BatchNormalization
 from keras.constraints import MaxNorm
 
-def get_training_model(input, output):
-    # # ResNet20
-    # n = 2
-    # depth =  n * 9 + 2
-    # n_blocks = ((depth - 2) // 9) - 1
 
-    # # The input tensor
-    # inputs = tf.keras.layers.Input(shape=(32, 32, 3))
-
-    # # The Stem Convolution Group
-    # x = resnet_cifar10.stem(inputs)
-
-    # # The learner
-    # x = resnet_cifar10.learner(x, n_blocks)
-
-    # # The Classifier for 10 classes
-    # outputs = resnet_cifar10.classifier(x, 10)
-
-    # # Instantiate the Model
-    # model = tf.keras.Model(inputs, outputs)
-
-    model = Sequential()
-      
-    # 1
-    model.add(Conv2D(
-        filters=32,
-        kernel_size=(5, 5),
-        padding='same',
-        activation='relu',
-        input_shape=input,
-        kernel_regularizer='l2',
-    ))
-    model.add(Conv2D(
-        filters=32,
-        kernel_size=(5, 5),
-        padding='same',
-        activation='relu',
-        kernel_regularizer='l2',
-    ))
-    model.add(MaxPooling2D(
-        pool_size=(2,2),
-        padding='same'
-    ))
-    model.add(Dropout(0.2))
-
-    # 2
-    model.add(Conv2D(
-        filters=64,
-        kernel_size=(5, 5),
-        padding='same',
-        activation='relu',
-        kernel_regularizer='l2',
-    ))
-    model.add(Conv2D(
-        filters=64,
-        kernel_size=(5, 5),
-        padding='same',
-        activation='relu',
-        kernel_regularizer='l2',
-    ))
-    model.add(MaxPooling2D(
-        pool_size=(2,2),
-        padding='same'
-    ))
-    model.add(Dropout(0.2))
-
-    # 3
-    model.add(Flatten())
-    model.add(Dense(
-        units=512,
-        activation='relu',
-        kernel_regularizer='l2',
-    ))
-    model.add(Dropout(0.2))
-    
-    # 4
-    model.add(Dense(
-        units=output,
-        activation='softmax'
-    ))
-    
-    # model.summary()
-
-    return model
-
-class Model(tf.keras.Model):
+class Model():
 
     def __init__(self, loss, optimizer, classes=10):
         self.loss = loss
@@ -158,22 +74,17 @@ class Model(tf.keras.Model):
             units=self.num_classes,
             activation='softmax'
         ))
-        
+
         model.compile(
             loss=self.loss,
             optimizer=self.optimizer,
             metrics=['accuracy']
         )
-        
-        # model.build(train_shape)
+
         return model
 
-tf.config.run_functions_eagerly(False)
-
-
-
-class SAMModel(tf.keras.Model):
-    def __init__(self, model , rho):
+class SAMModel(Model):
+    def __init__(self, model, rho=0.05):
         """
         p, q = 2 for optimal results as suggested in the paper
         (Section 2)
@@ -188,7 +99,7 @@ class SAMModel(tf.keras.Model):
         with tf.GradientTape() as tape:
             predictions = self.model(images)
             loss = self.compiled_loss(labels, predictions)
-        trainable_params = self.model.trainable_variables
+        trainable_params = self.resnet_model.trainable_variables
         gradients = tape.gradient(loss, trainable_params)
         grad_norm = self._grad_norm(gradients)
         scale = self.rho / (grad_norm + 1e-12)

@@ -13,19 +13,17 @@ import matplotlib.pyplot as plt
 import numpy as np
 import copy
 
-from build_model import Model
+from build_model import Model, get_training_model
 import csv
 import random
 import time
 
-
 # dataset_name = 'minst'
-dataset_name = 'cifar10'    
-
+dataset_name = 'cifar10'
 
 # client config
 NUMOFCLIENTS = 10 # number of client(as particles)
-EPOCHS = 30 # number of total iteration
+ROUND = 30 # number of total iteration
 CLIENT_EPOCHS = 5 # number of each client's iteration
 BATCH_SIZE = 10 # Size of batches to train on
 ACC = 0.3 # 0.4
@@ -39,7 +37,7 @@ DROP_RATE = 0 # 0 ~ 1.0 float value
 LOSS = 'categorical_crossentropy' # Loss function
 NUMOFCLASSES = 10 # Number of classes
 lr = 0.0025
-OPTIMIZER = SGD(learning_rate=lr, momentum=0.9, decay=lr/(EPOCHS*CLIENT_EPOCHS), nesterov=False) # lr = 0.015, 67 ~ 69%
+OPTIMIZER = SGD(learning_rate=lr, momentum=0.9, decay=lr/(ROUND*CLIENT_EPOCHS), nesterov=False) # lr = 0.015, 67 ~ 69%
 
 
 def write_csv(algorithm_name, dataset_name, list):
@@ -50,7 +48,7 @@ def write_csv(algorithm_name, dataset_name, list):
         algorithm_name: algorithm name, string type ex) FedPSO, FedAvg
         list: accuracy list, list type
     """
-    file_name = f'{algorithm_name}_{dataset_name}_randomDrop_{DROP_RATE}%_output_LR_{lr}_CLI_{NUMOFCLIENTS}_CLI_EPOCHS_{CLIENT_EPOCHS}_TOTAL_EPOCHS_{EPOCHS}_BATCH_{BATCH_SIZE}.csv'
+    file_name = f'{algorithm_name}_{dataset_name}_randomDrop_{DROP_RATE}%_output_LR_{lr}_CLI_{NUMOFCLIENTS}_CLI_EPOCHS_{CLIENT_EPOCHS}_TOTAL_EPOCHS_{ROUND}_BATCH_{BATCH_SIZE}_2.csv'
     #file_name = file_name.format(drop=DROP_RATE, name=algorithm_name, lr=lr, cli=NUMOFCLIENTS, cli_epoch=CLIENT_EPOCHS, epochs=EPOCHS, batch=BATCH_SIZE)
     f = open(file_name, 'w', encoding='utf-8', newline='')
     wr = csv.writer(f)
@@ -88,22 +86,11 @@ def load_dataset(dataset_name):
     return (X_train, Y_train), (X_test, Y_test)
 
 
-def init_model(train_data_shape):
-    """
-    Create a model for learning.
+def init_model(x_train_shape, y_train_shape):
+    model = get_training_model(x_train_shape, y_train_shape)
+    model.compile(optimizer=OPTIMIZER, loss=LOSS, metrics=["accuracy"])
 
-    Args:
-        train_data_shape: Image shape, ex) CIFAR10 == (32, 32, 3)
-
-    Returns:
-        Sequential model
-    """
-    model = Model(loss=LOSS, optimizer=OPTIMIZER, classes=NUMOFCLASSES)
-    init_model = model.fl_paper_model(train_shape=train_data_shape)
-    # init_model = model.deep_model(train_shape=train_data_shape)
-    # init_model = model.mobilenet(train_shape=train_data_shape)
-
-    return init_model
+    return model
 
 
 def client_data_config(x_train, y_train):
@@ -249,24 +236,28 @@ if __name__ == "__main__":
     
     (x_train, y_train), (x_test, y_test) = load_dataset(dataset_name)
 
-    server_model = init_model(train_data_shape=x_train.shape[1:])
-    print(server_model.summary())
+    start = time.time()
+    #模型初始化
+    server_model = init_model(x_train.shape[1:], NUMOFCLASSES)
+    # print(server_model.summary())
 
     client_data = client_data_config(x_train, y_train)
+
+    #存每個particle(client)的model
     pso_model = []
     for i in range(NUMOFCLIENTS):
-        pso_model.append(particle(particle_num=i, client=init_model(train_data_shape=x_train.shape[1:]), x_train=client_data[i][0], y_train=client_data[i][1]))
+        pso_model.append(particle(particle_num=i, client=init_model(client_data[i][0].shape[1:], NUMOFCLIENTS), x_train=client_data[i][0], y_train=client_data[i][1]))
 
     server_evaluate_acc = []
     global_best_model = None
     global_best_score = 0.0
 
-    for epoch in range(EPOCHS):
+    for r in range(ROUND):
         server_result = []
-        start = time.time()
+        # start = time.time()
 
         for client in pso_model:
-            if epoch != 0:
+            if r != 0:
                 client.update_global_model(server_model, global_best_score)
             
             # local_model, train_score = client.train_particle()
@@ -287,7 +278,8 @@ if __name__ == "__main__":
 
         server_model = global_best_model
         
-        print("server {}/{} evaluate".format(epoch+1, EPOCHS))
+        print("server {}/{} evaluate".format(r+1, ROUND))
         server_evaluate_acc.append(server_model.evaluate(x_test, y_test, batch_size=BATCH_SIZE, verbose=1))
-
-    write_csv("FedPSO", dataset_name ,  server_evaluate_acc)
+    end = time.time()
+    print(end-start)
+    write_csv("FedPSO", dataset_name ,server_evaluate_acc)
